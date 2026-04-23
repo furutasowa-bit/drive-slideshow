@@ -24,10 +24,9 @@ img { max-width:100%; max-height:100%; object-fit:contain; }
 
 <button onclick="start()">開始</button>
 <button onclick="stop()">停止</button>
-<button onclick="fullscreen()">全画面</button>
 </div>
 
-<div class="viewer" id="viewer">
+<div class="viewer">
 <img id="img">
 </div>
 
@@ -35,16 +34,17 @@ img { max-width:100%; max-height:100%; object-fit:contain; }
 
 <script>
 const CLIENT_ID = "994066302584-29k54ve6eivqbgiskgvaj3d8k2n6tbsi.apps.googleusercontent.com";
-const PARENT_ID = "1iZGU-qytQAtWkCbWpXA_CIFHVcxApXh1";
+const ROOT_ID = "1iZGU-qytQAtWkCbWpXA_CIFHVcxApXh1";
 
 let token;
+let foldersWithImages = [];
 let images = [];
 let index = 0;
 let timer;
 
+const select = document.getElementById("folderSelect");
 const interval = document.getElementById("interval");
 const sec = document.getElementById("sec");
-const select = document.getElementById("folderSelect");
 
 interval.oninput = () => {
   sec.textContent = interval.value + "秒";
@@ -57,7 +57,8 @@ const tokenClient = google.accounts.oauth2.initTokenClient({
   callback: async (res) => {
     token = res.access_token;
     alert("ログイン成功");
-    await loadFolders();
+    await scanFolders(ROOT_ID);
+    renderSelect();
   }
 });
 
@@ -65,19 +66,40 @@ function login(){
   tokenClient.requestAccessToken();
 }
 
-// 子フォルダ一覧取得
-async function loadFolders(){
-  const q = `'${PARENT_ID}' in parents and mimeType='application/vnd.google-apps.folder'`;
-
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`,
+// フォルダ探索
+async function scanFolders(folderId){
+  // 子フォルダ
+  const folderRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
     { headers:{ Authorization:"Bearer "+token } }
   );
+  const folders = (await folderRes.json()).files || [];
 
-  const data = await res.json();
+  // 画像チェック
+  const imgRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType contains 'image/'`,
+    { headers:{ Authorization:"Bearer "+token } }
+  );
+  const imgs = (await imgRes.json()).files || [];
+
+  // ★「画像があって子フォルダがない」＝最下層
+  if(imgs.length > 0 && folders.length === 0){
+    foldersWithImages.push({
+      id: folderId,
+      name: folderId
+    });
+  }
+
+  // 再帰
+  for(const f of folders){
+    await scanFolders(f.id);
+  }
+}
+
+// セレクト表示
+function renderSelect(){
   select.innerHTML = "";
-
-  data.files.forEach(f=>{
+  foldersWithImages.forEach(f=>{
     const op = document.createElement("option");
     op.value = f.id;
     op.textContent = f.name;
@@ -85,41 +107,17 @@ async function loadFolders(){
   });
 }
 
-// ★再帰でそのフォルダ内だけ取得
+// 画像取得（順番維持）
 async function getImages(folderId){
-  let result = [];
-
-  // 子フォルダ
-  const folderRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType contains 'image/'&orderBy=name`,
     { headers:{ Authorization:"Bearer "+token } }
   );
-
-  const folders = (await folderRes.json()).files || [];
-
-  // 画像
-  const imgRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType contains 'image/'`,
-    { headers:{ Authorization:"Bearer "+token } }
-  );
-
-  const imgs = (await imgRes.json()).files || [];
-
-  result = result.concat(imgs);
-
-  // 再帰
-  for(const f of folders){
-    const child = await getImages(f.id);
-    result = result.concat(child);
-  }
-
-  return result;
+  return (await res.json()).files || [];
 }
 
 async function start(){
-  const folderId = select.value;
-
-  images = await getImages(folderId);
+  images = await getImages(select.value);
 
   if(images.length === 0){
     alert("画像なし");
@@ -152,15 +150,6 @@ function restart(){
 
 function stop(){
   clearInterval(timer);
-}
-
-async function fullscreen(){
-  const viewer = document.getElementById("viewer");
-  if(!document.fullscreenElement){
-    await viewer.requestFullscreen();
-  } else {
-    await document.exitFullscreen();
-  }
 }
 </script>
 
