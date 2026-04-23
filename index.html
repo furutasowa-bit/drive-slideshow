@@ -1,35 +1,3 @@
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Slideshow</title>
-<style>
-body { margin:0; background:#111; color:#fff; }
-.controls { padding:10px; background:#222; display:flex; gap:8px; flex-wrap:wrap; justify-content:center;}
-.viewer { display:flex; justify-content:center; align-items:center; height:90vh;}
-img { max-width:100%; max-height:100%; object-fit:contain; }
-</style>
-</head>
-
-<body>
-
-<div class="controls">
-<button onclick="login()">ログイン</button>
-
-<select id="folderSelect"></select>
-
-<label>間隔</label>
-<input type="range" id="interval" min="1" max="5" value="3">
-<span id="sec">3秒</span>
-
-<button onclick="start()">開始</button>
-<button onclick="stop()">停止</button>
-</div>
-
-<div class="viewer">
-<img id="img">
-</div>
-
 <script src="https://accounts.google.com/gsi/client"></script>
 
 <script>
@@ -40,118 +8,201 @@ let token;
 let foldersWithImages = [];
 let images = [];
 let index = 0;
-let timer;
+let timer = null;
+let objectUrl = null;
 
 const select = document.getElementById("folderSelect");
 const interval = document.getElementById("interval");
 const sec = document.getElementById("sec");
+const img = document.getElementById("img");
 
 interval.oninput = () => {
   sec.textContent = interval.value + "秒";
-  if(timer) restart();
+  if (timer) restart();
 };
+
+function setStatus(text) {
+  let el = document.getElementById("status");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "status";
+    el.style.textAlign = "center";
+    el.style.padding = "8px";
+    el.style.color = "#fff";
+    document.body.insertBefore(el, document.querySelector(".viewer"));
+  }
+  el.textContent = text;
+}
 
 const tokenClient = google.accounts.oauth2.initTokenClient({
   client_id: CLIENT_ID,
   scope: "https://www.googleapis.com/auth/drive.readonly",
   callback: async (res) => {
-    token = res.access_token;
-    alert("ログイン成功");
-    await scanFolders(ROOT_ID);
-    renderSelect();
+    try {
+      token = res.access_token;
+      foldersWithImages = [];
+      select.innerHTML = "";
+      setStatus("フォルダを読み込み中...");
+
+      await scanFolders(ROOT_ID, "親フォルダ");
+
+      renderSelect();
+
+      if (foldersWithImages.length === 0) {
+        setStatus("画像入りの最下層フォルダが見つからなかった");
+      } else {
+        setStatus(`読み込み完了: ${foldersWithImages.length} 個のフォルダ`);
+      }
+    } catch (e) {
+      console.error(e);
+      setStatus("読み込みに失敗した");
+      alert("フォルダの読み込みに失敗した。F12のコンソールも確認してみて。");
+    }
   }
 });
 
-function login(){
+function login() {
   tokenClient.requestAccessToken();
 }
 
-// フォルダ探索
-async function scanFolders(folderId){
-  // 子フォルダ
-  const folderRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
-    { headers:{ Authorization:"Bearer "+token } }
-  );
-  const folders = (await folderRes.json()).files || [];
+async function listAllFiles(query, fields = "files(id,name),nextPageToken") {
+  let all = [];
+  let pageToken = "";
 
-  // 画像チェック
-  const imgRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType contains 'image/'`,
-    { headers:{ Authorization:"Bearer "+token } }
-  );
-  const imgs = (await imgRes.json()).files || [];
+  while (true) {
+    const url =
+      "https://www.googleapis.com/drive/v3/files" +
+      `?q=${encodeURIComponent(query)}` +
+      `&fields=${encodeURIComponent(fields)}` +
+      `&pageSize=1000` +
+      (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
 
-  // ★「画像があって子フォルダがない」＝最下層
-  if(imgs.length > 0 && folders.length === 0){
+    const res = await fetch(url, {
+      headers: { Authorization: "Bearer " + token }
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error("Drive API error: " + text);
+    }
+
+    const data = await res.json();
+    all = all.concat(data.files || []);
+
+    if (!data.nextPageToken) break;
+    pageToken = data.nextPageToken;
+  }
+
+  return all;
+}
+
+async function getChildFolders(folderId) {
+  const q = `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  return await listAllFiles(q, "files(id,name),nextPageToken");
+}
+
+async function getImagesInFolder(folderId) {
+  const q = `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`;
+  return await listAllFiles(q, "files(id,name),nextPageToken");
+}
+
+async function scanFolders(folderId, path) {
+  const childFolders = await getChildFolders(folderId);
+  const imgs = await getImagesInFolder(folderId);
+
+  setStatus(`探索中: ${path}`);
+
+  if (imgs.length > 0 && childFolders.length === 0) {
     foldersWithImages.push({
       id: folderId,
-      name: folderId
+      name: path
     });
   }
 
-  // 再帰
-  for(const f of folders){
-    await scanFolders(f.id);
+  for (const folder of childFolders) {
+    await scanFolders(folder.id, `${path} / ${folder.name}`);
   }
 }
 
-// セレクト表示
-function renderSelect(){
+function renderSelect() {
   select.innerHTML = "";
-  foldersWithImages.forEach(f=>{
+
+  for (const f of foldersWithImages) {
     const op = document.createElement("option");
     op.value = f.id;
     op.textContent = f.name;
     select.appendChild(op);
-  });
+  }
 }
 
-// 画像取得（順番維持）
-async function getImages(folderId){
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType contains 'image/'&orderBy=name`,
-    { headers:{ Authorization:"Bearer "+token } }
-  );
-  return (await res.json()).files || [];
+async function getImages(folderId) {
+  const q = `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`;
+  return await listAllFiles(q, "files(id,name),nextPageToken");
 }
 
-async function start(){
+async function start() {
+  if (!token) {
+    alert("先にログインしてね");
+    return;
+  }
+
+  if (!select.value) {
+    alert("フォルダがまだ読み込まれていないか、見つかっていない");
+    return;
+  }
+
+  setStatus("画像を読み込み中...");
   images = await getImages(select.value);
 
-  if(images.length === 0){
+  images.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  if (images.length === 0) {
+    setStatus("そのフォルダに画像がない");
     alert("画像なし");
     return;
   }
 
   index = 0;
-  show();
+  await show();
   restart();
+  setStatus(`${images.length} 枚を再生中`);
 }
 
-async function show(){
+async function show() {
   const id = images[index].id;
 
   const res = await fetch(
     `https://www.googleapis.com/drive/v3/files/${id}?alt=media`,
-    { headers:{ Authorization:"Bearer "+token } }
+    { headers: { Authorization: "Bearer " + token } }
   );
 
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error("画像取得失敗: " + text);
+  }
+
   const blob = await res.blob();
-  document.getElementById("img").src = URL.createObjectURL(blob);
+
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = URL.createObjectURL(blob);
+  img.src = objectUrl;
 
   index = (index + 1) % images.length;
 }
 
-function restart(){
+function restart() {
   clearInterval(timer);
-  timer = setInterval(show, interval.value * 1000);
+  timer = setInterval(() => {
+    show().catch(err => {
+      console.error(err);
+      setStatus("再生中にエラーが出た");
+      stop();
+    });
+  }, Number(interval.value) * 1000);
 }
 
-function stop(){
+function stop() {
   clearInterval(timer);
+  timer = null;
 }
 </script>
-
-</body>
-</html>
