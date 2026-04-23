@@ -1,88 +1,45 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Drive Slideshow</title>
-
-  <style>
-    body {
-      margin: 0;
-      background: #111;
-      color: #fff;
-      font-family: sans-serif;
-    }
-
-    .controls {
-      background: #1a1a1a;
-      padding: 10px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      justify-content: center;
-    }
-
-    button, select, input {
-      padding: 8px;
-      border-radius: 8px;
-      border: none;
-      font-size: 14px;
-    }
-
-    .viewer {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: calc(100vh - 80px);
-    }
-
-    img {
-      max-width: 100%;
-      max-height: 100%;
-      object-fit: contain;
-      border-radius: 10px;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Slideshow</title>
+<style>
+body { margin:0; background:#111; color:#fff; }
+.controls { padding:10px; background:#222; display:flex; gap:8px; flex-wrap:wrap; justify-content:center;}
+.viewer { display:flex; justify-content:center; align-items:center; height:90vh;}
+img { max-width:100%; max-height:100%; object-fit:contain; }
+</style>
 </head>
 
 <body>
 
 <div class="controls">
-  <button id="loginBtn">ログイン</button>
+<button onclick="login()">ログイン</button>
 
-  <select id="folderSelect">
-    <option>ログイン後に読み込み</option>
-  </select>
+<label>間隔</label>
+<input type="range" id="interval" min="1" max="5" value="3">
+<span id="sec">3秒</span>
 
-  <label>間隔</label>
-  <input type="range" id="interval" min="1" max="5" value="3">
-  <span id="sec">3秒</span>
-
-  <button id="startBtn">開始</button>
-  <button id="stopBtn">停止</button>
-  <button id="fullBtn">全画面</button>
+<button onclick="start()">開始</button>
+<button onclick="stop()">停止</button>
+<button onclick="fullscreen()">全画面</button>
 </div>
 
 <div class="viewer" id="viewer">
-  <img id="img">
+<img id="img">
 </div>
 
 <script src="https://accounts.google.com/gsi/client"></script>
 
 <script>
 const CLIENT_ID = "994066302584-29k54ve6eivqbgiskgvaj3d8k2n6tbsi.apps.googleusercontent.com";
+const ROOT_ID = "1iZGU-qytQAtWkCbWpXA_CIFHVcxApXh1";
 
-// ★ここだけ入れる
-const PARENT_FOLDER_ID = "1iZGU-qytQAtWkCbWpXA_CIFHVcxApXh1";
-
-let token = null;
-let files = [];
+let token;
+let images = [];
 let index = 0;
-let timer = null;
-let objUrl = null;
+let timer;
 
-const img = document.getElementById("img");
-const folderSelect = document.getElementById("folderSelect");
 const interval = document.getElementById("interval");
 const sec = document.getElementById("sec");
 
@@ -94,56 +51,50 @@ interval.oninput = () => {
 const tokenClient = google.accounts.oauth2.initTokenClient({
   client_id: CLIENT_ID,
   scope: "https://www.googleapis.com/auth/drive.readonly",
-  callback: async (res) => {
-    token = res.access_token;
-    alert("ログイン成功");
-    await loadFolders();
-  }
+  callback: () => alert("ログイン成功")
 });
 
-document.getElementById("loginBtn").onclick = () => {
-  tokenClient.requestAccessToken();
-};
-
-// 子フォルダ取得
-async function loadFolders(){
-  const q = `'${PARENT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`,
-    { headers: { Authorization: "Bearer " + token } }
-  );
-
-  const data = await res.json();
-  folderSelect.innerHTML = "";
-
-  data.files.forEach(f => {
-    const op = document.createElement("option");
-    op.value = f.id;
-    op.textContent = f.name;
-    folderSelect.appendChild(op);
+function login(){
+  tokenClient.requestAccessToken((res)=>{
+    token = res.access_token;
   });
 }
 
-// 画像取得
-async function getImages(folderId){
-  const q = `'${folderId}' in parents and mimeType contains 'image/'`;
+// ★再帰で全部取得
+async function getAllImages(folderId){
+  let result = [];
 
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`,
-    { headers: { Authorization: "Bearer " + token } }
+  // フォルダ取得
+  const folderRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
+    { headers:{ Authorization:"Bearer "+token } }
   );
 
-  const data = await res.json();
-  return data.files || [];
+  const folders = (await folderRes.json()).files || [];
+
+  // 画像取得
+  const imgRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType contains 'image/'`,
+    { headers:{ Authorization:"Bearer "+token } }
+  );
+
+  const imgs = (await imgRes.json()).files || [];
+
+  result = result.concat(imgs);
+
+  // 子フォルダを再帰
+  for(const f of folders){
+    const child = await getAllImages(f.id);
+    result = result.concat(child);
+  }
+
+  return result;
 }
 
-// スライド開始
-document.getElementById("startBtn").onclick = async () => {
-  const folderId = folderSelect.value;
-  files = await getImages(folderId);
+async function start(){
+  images = await getAllImages(ROOT_ID);
 
-  if(files.length === 0){
+  if(images.length === 0){
     alert("画像なし");
     return;
   }
@@ -151,47 +102,39 @@ document.getElementById("startBtn").onclick = async () => {
   index = 0;
   show();
   restart();
-};
+}
 
-// 表示
 async function show(){
-  const id = files[index].id;
+  const id = images[index].id;
 
   const res = await fetch(
     `https://www.googleapis.com/drive/v3/files/${id}?alt=media`,
-    { headers: { Authorization: "Bearer " + token } }
+    { headers:{ Authorization:"Bearer "+token } }
   );
 
   const blob = await res.blob();
+  document.getElementById("img").src = URL.createObjectURL(blob);
 
-  if(objUrl) URL.revokeObjectURL(objUrl);
-  objUrl = URL.createObjectURL(blob);
-
-  img.src = objUrl;
-
-  index = (index + 1) % files.length;
+  index = (index + 1) % images.length;
 }
 
-// タイマー再起動
 function restart(){
   clearInterval(timer);
   timer = setInterval(show, interval.value * 1000);
 }
 
-// 停止
-document.getElementById("stopBtn").onclick = () => {
+function stop(){
   clearInterval(timer);
-};
+}
 
-// 全画面
-document.getElementById("fullBtn").onclick = async () => {
+async function fullscreen(){
   const viewer = document.getElementById("viewer");
   if(!document.fullscreenElement){
     await viewer.requestFullscreen();
   } else {
     await document.exitFullscreen();
   }
-};
+}
 </script>
 
 </body>
