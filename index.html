@@ -16,6 +16,8 @@ img { max-width:100%; max-height:100%; object-fit:contain; }
 <div class="controls">
 <button onclick="login()">ログイン</button>
 
+<select id="folderSelect"></select>
+
 <label>間隔</label>
 <input type="range" id="interval" min="1" max="5" value="3">
 <span id="sec">3秒</span>
@@ -33,7 +35,7 @@ img { max-width:100%; max-height:100%; object-fit:contain; }
 
 <script>
 const CLIENT_ID = "994066302584-29k54ve6eivqbgiskgvaj3d8k2n6tbsi.apps.googleusercontent.com";
-const ROOT_ID = "1iZGU-qytQAtWkCbWpXA_CIFHVcxApXh1";
+const PARENT_ID = "1iZGU-qytQAtWkCbWpXA_CIFHVcxApXh1";
 
 let token;
 let images = [];
@@ -42,6 +44,7 @@ let timer;
 
 const interval = document.getElementById("interval");
 const sec = document.getElementById("sec");
+const select = document.getElementById("folderSelect");
 
 interval.oninput = () => {
   sec.textContent = interval.value + "秒";
@@ -51,20 +54,42 @@ interval.oninput = () => {
 const tokenClient = google.accounts.oauth2.initTokenClient({
   client_id: CLIENT_ID,
   scope: "https://www.googleapis.com/auth/drive.readonly",
-  callback: () => alert("ログイン成功")
+  callback: async (res) => {
+    token = res.access_token;
+    alert("ログイン成功");
+    await loadFolders();
+  }
 });
 
 function login(){
-  tokenClient.requestAccessToken((res)=>{
-    token = res.access_token;
+  tokenClient.requestAccessToken();
+}
+
+// 子フォルダ一覧取得
+async function loadFolders(){
+  const q = `'${PARENT_ID}' in parents and mimeType='application/vnd.google-apps.folder'`;
+
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`,
+    { headers:{ Authorization:"Bearer "+token } }
+  );
+
+  const data = await res.json();
+  select.innerHTML = "";
+
+  data.files.forEach(f=>{
+    const op = document.createElement("option");
+    op.value = f.id;
+    op.textContent = f.name;
+    select.appendChild(op);
   });
 }
 
-// ★再帰で全部取得
-async function getAllImages(folderId){
+// ★再帰でそのフォルダ内だけ取得
+async function getImages(folderId){
   let result = [];
 
-  // フォルダ取得
+  // 子フォルダ
   const folderRes = await fetch(
     `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
     { headers:{ Authorization:"Bearer "+token } }
@@ -72,7 +97,7 @@ async function getAllImages(folderId){
 
   const folders = (await folderRes.json()).files || [];
 
-  // 画像取得
+  // 画像
   const imgRes = await fetch(
     `https://www.googleapis.com/drive/v3/files?q='${folderId}' in parents and mimeType contains 'image/'`,
     { headers:{ Authorization:"Bearer "+token } }
@@ -82,9 +107,9 @@ async function getAllImages(folderId){
 
   result = result.concat(imgs);
 
-  // 子フォルダを再帰
+  // 再帰
   for(const f of folders){
-    const child = await getAllImages(f.id);
+    const child = await getImages(f.id);
     result = result.concat(child);
   }
 
@@ -92,7 +117,9 @@ async function getAllImages(folderId){
 }
 
 async function start(){
-  images = await getAllImages(ROOT_ID);
+  const folderId = select.value;
+
+  images = await getImages(folderId);
 
   if(images.length === 0){
     alert("画像なし");
