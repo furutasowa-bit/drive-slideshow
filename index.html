@@ -6,12 +6,14 @@
   <title>Drive Slideshow</title>
   <style>
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
       background: #111;
       color: #fff;
       font-family: sans-serif;
     }
+
     .controls {
       position: sticky;
       top: 0;
@@ -25,28 +27,41 @@
       justify-content: center;
       border-bottom: 1px solid #333;
     }
+
     button, select, input {
       font-size: 16px;
       padding: 8px 10px;
       border-radius: 8px;
       border: none;
     }
+
     button {
       cursor: pointer;
     }
+
     #status {
       padding: 10px;
       text-align: center;
       color: #ddd;
       min-height: 2.5em;
     }
+
+    #path {
+      padding: 0 12px 12px;
+      color: #bbb;
+      font-size: 14px;
+      word-break: break-word;
+      text-align: center;
+    }
+
     .viewer {
       display: flex;
       justify-content: center;
       align-items: center;
-      height: calc(100vh - 130px);
+      height: calc(100vh - 180px);
       padding: 8px;
     }
+
     #img {
       max-width: 100%;
       max-height: 100%;
@@ -54,22 +69,20 @@
       background: #000;
       border-radius: 10px;
     }
-    .small {
-      font-size: 14px;
-      color: #ccc;
-    }
   </style>
 </head>
 <body>
   <div class="controls">
     <button id="loginBtn" type="button">ログイン</button>
+    <button id="backBtn" type="button">戻る</button>
 
-    <label for="folderSelect" class="small">フォルダ</label>
     <select id="folderSelect">
       <option value="">ログイン後に読み込み</option>
     </select>
 
-    <label for="interval" class="small">間隔</label>
+    <button id="openBtn" type="button">開く</button>
+
+    <label for="interval">間隔</label>
     <input type="range" id="interval" min="1" max="5" step="1" value="3">
     <span id="sec">3秒</span>
 
@@ -79,6 +92,7 @@
   </div>
 
   <div id="status">待機中</div>
+  <div id="path">現在地: 未ログイン</div>
 
   <div class="viewer" id="viewer">
     <img id="img" alt="slideshow image">
@@ -93,52 +107,70 @@
       const ROOT_ID = "1iZGU-qytQAtWkCbWpXA_CIFHVcxApXh1";
 
       let token = null;
-      let foldersWithImages = [];
-      let images = [];
-      let index = 0;
-      let timer = null;
-      let objectUrl = null;
       let tokenClient = null;
 
+      let timer = null;
+      let objectUrl = null;
+      let slideshowImages = [];
+      let slideshowIndex = 0;
+
+      // 現在の階層
+      let currentFolderId = ROOT_ID;
+      let currentPathNames = ["親フォルダ"];
+
+      // キャッシュ
+      const folderCache = new Map(); // folderId -> [{id,name}]
+      const imageCache = new Map();  // folderId -> [{id,name}]
+
       const loginBtn = document.getElementById("loginBtn");
+      const backBtn = document.getElementById("backBtn");
+      const openBtn = document.getElementById("openBtn");
       const folderSelect = document.getElementById("folderSelect");
       const interval = document.getElementById("interval");
       const sec = document.getElementById("sec");
       const startBtn = document.getElementById("startBtn");
       const stopBtn = document.getElementById("stopBtn");
       const fullBtn = document.getElementById("fullBtn");
-      const img = document.getElementById("img");
-      const viewer = document.getElementById("viewer");
       const statusEl = document.getElementById("status");
+      const pathEl = document.getElementById("path");
+      const viewer = document.getElementById("viewer");
+      const img = document.getElementById("img");
+
+      // 履歴
+      const navStack = [];
 
       function setStatus(text) {
         statusEl.textContent = text;
       }
 
-      function stop() {
+      function updatePath() {
+        pathEl.textContent = "現在地: " + currentPathNames.join(" / ");
+      }
+
+      function stopSlideshow() {
         if (timer) {
           clearInterval(timer);
           timer = null;
         }
       }
 
-      function restart() {
-        stop();
+      function restartSlideshow() {
+        stopSlideshow();
         timer = setInterval(() => {
-          show().catch(err => {
+          showCurrentImage().catch(err => {
             console.error(err);
             setStatus("再生中にエラー");
-            stop();
+            stopSlideshow();
           });
         }, Number(interval.value) * 1000);
       }
 
       interval.addEventListener("input", () => {
         sec.textContent = interval.value + "秒";
-        if (timer) restart();
+        if (timer) restartSlideshow();
       });
 
-      async function apiListAll(query, orderBy = "") {
+      async function apiListAll(query, orderBy = "name") {
         let all = [];
         let pageToken = "";
 
@@ -167,6 +199,7 @@
 
           const data = await res.json();
           all = all.concat(data.files || []);
+
           if (!data.nextPageToken) break;
           pageToken = data.nextPageToken;
         }
@@ -175,56 +208,135 @@
       }
 
       async function getChildFolders(folderId) {
+        if (folderCache.has(folderId)) {
+          return folderCache.get(folderId);
+        }
+
         const q = `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-        return await apiListAll(q, "name");
+        const folders = await apiListAll(q, "name");
+        folders.sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
+        );
+        folderCache.set(folderId, folders);
+        return folders;
       }
 
       async function getImagesInFolder(folderId) {
+        if (imageCache.has(folderId)) {
+          return imageCache.get(folderId);
+        }
+
         const q = `'${folderId}' in parents and mimeType contains 'image/' and trashed=false`;
-        return await apiListAll(q, "name");
+        const images = await apiListAll(q, "name");
+        images.sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
+        );
+        imageCache.set(folderId, images);
+        return images;
       }
 
-      async function scanFolders(folderId, path) {
-        setStatus("探索中: " + path);
+      async function renderFolderList(folderId) {
+        setStatus("フォルダ情報を読み込み中...");
+        folderSelect.innerHTML = '<option value="">読み込み中...</option>';
 
-        const childFolders = await getChildFolders(folderId);
-        const imgs = await getImagesInFolder(folderId);
+        const [folders, images] = await Promise.all([
+          getChildFolders(folderId),
+          getImagesInFolder(folderId)
+        ]);
 
-        if (imgs.length > 0 && childFolders.length === 0) {
-          foldersWithImages.push({
-            id: folderId,
-            name: path
-          });
-        }
-
-        for (const folder of childFolders) {
-          await scanFolders(folder.id, `${path} / ${folder.name}`);
-        }
-      }
-
-      function renderSelect() {
         folderSelect.innerHTML = "";
 
-        if (foldersWithImages.length === 0) {
+        for (const folder of folders) {
+          const op = document.createElement("option");
+          op.value = folder.id;
+          op.textContent = "📁 " + folder.name;
+          op.dataset.type = "folder";
+          folderSelect.appendChild(op);
+        }
+
+        for (const image of images) {
+          const op = document.createElement("option");
+          op.value = image.id;
+          op.textContent = "🖼 " + image.name;
+          op.dataset.type = "image";
+          folderSelect.appendChild(op);
+        }
+
+        if (folders.length === 0 && images.length === 0) {
           const op = document.createElement("option");
           op.value = "";
-          op.textContent = "該当フォルダなし";
+          op.textContent = "空のフォルダ";
           folderSelect.appendChild(op);
+          setStatus("空のフォルダ");
+        } else {
+          setStatus(`フォルダ ${folders.length}件 / 画像 ${images.length}件`);
+        }
+
+        updatePath();
+      }
+
+      async function openSelectedFolder() {
+        const selected = folderSelect.selectedOptions[0];
+        if (!selected) {
+          alert("何か選んでね");
           return;
         }
 
-        for (const f of foldersWithImages) {
-          const op = document.createElement("option");
-          op.value = f.id;
-          op.textContent = f.name;
-          folderSelect.appendChild(op);
+        if (selected.dataset.type !== "folder") {
+          alert("フォルダを選んでから開いてね");
+          return;
         }
+
+        navStack.push({
+          folderId: currentFolderId,
+          pathNames: [...currentPathNames]
+        });
+
+        currentFolderId = selected.value;
+        currentPathNames.push(selected.textContent.replace(/^📁\s*/, ""));
+
+        await renderFolderList(currentFolderId);
       }
 
-      async function show() {
-        if (!images.length) return;
+      async function goBack() {
+        if (navStack.length === 0) {
+          alert("これ以上戻れない");
+          return;
+        }
 
-        const file = images[index];
+        const prev = navStack.pop();
+        currentFolderId = prev.folderId;
+        currentPathNames = [...prev.pathNames];
+
+        await renderFolderList(currentFolderId);
+      }
+
+      async function startSlideshow() {
+        if (!token) {
+          alert("先にログインしてね");
+          return;
+        }
+
+        const images = await getImagesInFolder(currentFolderId);
+
+        if (!images.length) {
+          alert("このフォルダ直下に画像がない");
+          setStatus("このフォルダ直下に画像がない");
+          return;
+        }
+
+        slideshowImages = images;
+        slideshowIndex = 0;
+
+        await showCurrentImage();
+        restartSlideshow();
+        setStatus(`${slideshowImages.length}枚を再生中`);
+      }
+
+      async function showCurrentImage() {
+        if (!slideshowImages.length) return;
+
+        const file = slideshowImages[slideshowIndex];
         const res = await fetch(
           `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
           { headers: { Authorization: "Bearer " + token } }
@@ -237,60 +349,14 @@
 
         const blob = await res.blob();
 
-        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+        }
+
         objectUrl = URL.createObjectURL(blob);
         img.src = objectUrl;
 
-        index = (index + 1) % images.length;
-      }
-
-      async function start() {
-        if (!token) {
-          alert("先にログインしてね");
-          return;
-        }
-
-        const folderId = folderSelect.value;
-        if (!folderId) {
-          alert("フォルダがまだ選べない状態");
-          return;
-        }
-
-        setStatus("画像を読み込み中...");
-        images = await getImagesInFolder(folderId);
-
-        images.sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
-        );
-
-        if (images.length === 0) {
-          setStatus("このフォルダに画像がない");
-          alert("画像なし");
-          return;
-        }
-
-        index = 0;
-        await show();
-        restart();
-        setStatus(`${images.length}枚を再生中`);
-      }
-
-      async function loadFoldersAfterLogin() {
-        foldersWithImages = [];
-        folderSelect.innerHTML = '<option value="">読み込み中...</option>';
-        setStatus("フォルダ構造を読み込み中...");
-
-        await scanFolders(ROOT_ID, "親フォルダ");
-        foldersWithImages.sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
-        );
-        renderSelect();
-
-        if (foldersWithImages.length === 0) {
-          setStatus("画像入りの最下層フォルダが見つからない");
-        } else {
-          setStatus(`読み込み完了: ${foldersWithImages.length}個のフォルダ`);
-        }
+        slideshowIndex = (slideshowIndex + 1) % slideshowImages.length;
       }
 
       function initAuth() {
@@ -305,11 +371,14 @@
           callback: async (res) => {
             try {
               token = res.access_token;
-              setStatus("ログイン成功。フォルダ読込開始...");
-              await loadFoldersAfterLogin();
+              currentFolderId = ROOT_ID;
+              currentPathNames = ["親フォルダ"];
+              navStack.length = 0;
+              setStatus("ログイン成功");
+              await renderFolderList(ROOT_ID);
             } catch (e) {
               console.error(e);
-              setStatus("ログイン後の読込に失敗");
+              setStatus("ログイン後の読み込み失敗");
               alert("ログイン後の読み込みに失敗した");
             }
           }
@@ -318,27 +387,36 @@
 
       loginBtn.addEventListener("click", () => {
         try {
-          if (!tokenClient) {
-            initAuth();
-          }
-          if (!tokenClient) return;
+          if (!tokenClient) initAuth();
           tokenClient.requestAccessToken();
         } catch (e) {
           console.error(e);
-          setStatus("ログイン開始に失敗");
-          alert("ログイン開始に失敗した");
+          setStatus("ログイン開始失敗");
         }
       });
 
-      startBtn.addEventListener("click", () => {
-        start().catch(err => {
+      backBtn.addEventListener("click", () => {
+        goBack().catch(err => {
           console.error(err);
-          setStatus("開始時にエラー");
-          alert("開始時にエラーが出た");
+          setStatus("戻るでエラー");
         });
       });
 
-      stopBtn.addEventListener("click", stop);
+      openBtn.addEventListener("click", () => {
+        openSelectedFolder().catch(err => {
+          console.error(err);
+          setStatus("フォルダを開くときにエラー");
+        });
+      });
+
+      startBtn.addEventListener("click", () => {
+        startSlideshow().catch(err => {
+          console.error(err);
+          setStatus("開始時にエラー");
+        });
+      });
+
+      stopBtn.addEventListener("click", stopSlideshow);
 
       fullBtn.addEventListener("click", async () => {
         try {
@@ -356,12 +434,13 @@
       window.addEventListener("load", () => {
         sec.textContent = interval.value + "秒";
         setStatus("ページ読込完了。ログインしてね");
+        updatePath();
         initAuth();
       });
 
       window.addEventListener("error", (e) => {
         console.error("window error:", e.error || e.message);
-        setStatus("ページエラーが発生");
+        setStatus("ページエラー発生");
       });
     })();
   </script>
